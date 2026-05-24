@@ -1,0 +1,137 @@
+version: "3.9"
+
+services:
+
+  # ── FastAPI Application ────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: ai_backend_api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://aibackend:aibackend_password@postgres:5432/aibackend_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── Celery Worker ──────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: ai_backend_worker
+    command: celery -A app.workers.celery_app worker --loglevel=info --queues=default,heavy,ai -c 2
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://aibackend:aibackend_password@postgres:5432/aibackend_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - api
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+
+  # ── Celery Beat Scheduler ──────────────────────────────────────────────────
+  beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: ai_backend_beat
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - DATABASE_URL=postgresql+asyncpg://aibackend:aibackend_password@postgres:5432/aibackend_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - worker
+    restart: unless-stopped
+
+  # ── Flower (Celery monitoring UI) ──────────────────────────────────────────
+  flower:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: ai_backend_flower
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    env_file: .env
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - worker
+    restart: unless-stopped
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai_backend_postgres
+    environment:
+      POSTGRES_USER: aibackend
+      POSTGRES_PASSWORD: aibackend_password
+      POSTGRES_DB: aibackend_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aibackend -d aibackend_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ai_backend_redis
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: ai_backend_network
